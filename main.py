@@ -1,105 +1,130 @@
-import re
-import torch
-import numpy as np
-from tqdm import tqdm
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
+import os
+import time
+from dotenv import load_dotenv
+from openai import OpenAI
+from tqdm import tqdm  # Importa tqdm para a barra de progresso
 
-stop_words_pt = [
-    "a", "ao", "aos", "a", "com", "da", "das", "de", "do", "dos", "em", "para", "per", "por", "que", "um", "uma", "uns", "umas"
-]
+load_dotenv()
 
-def test_gpu():
-    print("GPU disponível:", torch.cuda.is_available())
-    x = torch.tensor([1.0, 2.0, 3.0])
-    print('Tensor simples para teste', x)
+client = OpenAI(
+    api_key=os.getenv('LLAMA3_API_KEY'),
+    base_url=os.getenv('LLAMA3_API_URL'),
+)
+
+def make_llama3_request(instruction, max_tokens=2048):
+    response = client.chat.completions.create(
+        model="llama-13b-chat",
+        messages=[
+            {"role": "system", "content": "Assistant is a large language model trained by OpenAI."},
+            {"role": "user", "content": instruction},
+        ],
+        max_tokens=50
+    )
+
+    return response.choices[0].message.content.strip()
+
+def split_text(text, max_length):
+    words = text.split()
+    chunks = []
+    current_chunk = []
+
+    for word in words:
+        current_chunk.append(word)
+        if len(current_chunk) >= max_length:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = []
+
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+
+    return chunks
+
+def reduce_text_for_title(text, max_words):
+    words = text.split()
+    return ' '.join(words[:max_words])
+
+def generate_title(text):
+    max_words = 50
+    reduced_text = reduce_text_for_title(text, max_words)
+
+    instruction = f"""
+        A partir do seguinte texto reduzido, gere um título conciso e informativo que capture o tema principal:
+        {reduced_text}
+
+        Retorne apenas o título, sem aspas ou marcas adicionais.
+    """
+
+    return make_llama3_request(instruction, max_words)
+
+def generate_initial_summary(text):
+    instruction = f"""
+        Resuma o seguinte texto em tópicos, focando apenas no conteúdo relevante e ignorando qualquer assunto irrelevante:
+        {text}
+
+        Produza um resumo categorizado que inclua:
+        1. Um título principal.
+        2. Introdução.
+        3. Divisões de tópicos com subtítulos.
+    """
+
+    return make_llama3_request(instruction)
+
+def generate_partial_summary(text):
+    instruction = f"""
+        Resuma o seguinte texto em tópicos, focando apenas nas partes relevantes e ignorando informações não essenciais:
+        {text}
+
+        Produza um resumo categorizado que inclua:
+        Divisões de tópicos com subtítulos.
+    """
+
+    return make_llama3_request(instruction)
+
+def generate_conclusion(text):
+    instruction = f"""
+        A partir do texto fornecido, gere uma conclusão final que resuma os principais pontos discutidos e ignore detalhes irrelevantes:
+        {text}
+
+        Produza uma conclusão que sintetize as informações principais.
+    """
+
+    return make_llama3_request(instruction, 512)
+
+def generate_report_summary(text):
+    text_chunks = split_text(text, 100)
+    
+    summaries = []
+    for chunk in tqdm(text_chunks, total=len(text_chunks), desc='Processando partes'):
+        partial_summary = generate_partial_summary(chunk)
+        summaries.append(partial_summary)
+
+        time.sleep(2)
+
+    combined_summary = "\n\n".join(summaries)
+
+    return combined_summary
 
 def read_text_from_file(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
         text = file.read()
     return text
 
-def preprocess_text(text):
-    # Remove URLs, e-mails e outras informações irrelevantes
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\S+@\S+', '', text, flags=re.MULTILINE)
-
-    # Remove palavras e frases que não estão relacionadas
-    text = re.sub(r'\b(oi|boa noite|gente|etc)\b', '', text, flags=re.IGNORECASE)
-
-    # Remove múltiplos espaços e quebras de linha
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
-
-def split_into_paragraphs(text):
-    # Divida o texto em parágrafos baseados em pontuações
-    paragraphs = re.split(r'\.\s+', text)
-    return [p.strip() for p in paragraphs if p.strip()]
-
-def extract_topics(paragraphs, n_topics):
-    print("Extraindo tópicos...")
-    vectorizer = TfidfVectorizer(stop_words=stop_words_pt)
-    X = vectorizer.fit_transform(paragraphs)
-    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42)
-    lda.fit(X)
-
-    feature_names = vectorizer.get_feature_names_out()
-    topic_keywords = []
-    for topic_index, topic in tqdm(enumerate(lda.components_), desc="Extraindo tópicos", total=n_topics):
-        top_keywords_index = topic.argsort()[-10:][::-1]
-        top_keywords = [feature_names[i] for i in top_keywords_index]
-        topic_keywords.append(' '.join(top_keywords))
-
-    return topic_keywords, lda.transform(X)
-
-def categorize_text(text):
-    preprocessed_text = preprocess_text(text)
-    paragraphs = split_into_paragraphs(preprocessed_text)
-
-    print("Extraindo tópicos...")
-    topics, topic_matrix = extract_topics(paragraphs, n_topics=5)  # Ajuste o número de tópicos conforme necessário
-
-    print("Tópicos dos parágrafos extraídos")
-    print(f"{len(paragraphs)} parágrafos detectados")
-
-    categorized_text = {}
-    for i, paragraph in enumerate(paragraphs):
-        topic_index = np.argmax(topic_matrix[i])
-        topic = topics[topic_index]
-
-        if topic not in categorized_text:
-            categorized_text[topic] = []
-        categorized_text[topic].append(paragraph)
-    
-    return categorized_text
-
-def capitalize_title(title):
-    return title.capitalize()
-
-def save_to_markdown(categorized_text, output_file):
-    print(f"Salvando texto categorizado em {output_file}...")
+def save_to_markdown(text, output_file):
     with open(output_file, 'w', encoding='utf-8') as file:
-        for topic, paragraphs in categorized_text.items():
-
-            topic_capitalized = capitalize_title(topic)
-            file.write(f"## {topic_capitalized}\n\n")
-            for paragraph in paragraphs:
-                file.write(f"{paragraph}\n\n")
-            file.write("\n")
+        file.write(text)
+    
+    print(f'Arquivo salvo em {output_file}')
 
 def bootstrap():
-    test_gpu()
-
-    file_path = "data/artigo-ia.txt"
+    file_path = "data/resumo.txt"
     text = read_text_from_file(file_path)
     print("Arquivo de texto carregado")
 
-    categorized_text = categorize_text(text)
-
-    markdown_file = "texto_categorizado.md"
-    save_to_markdown(categorized_text, markdown_file)
-    print(f"Texto categorizado salvo em {markdown_file}")
+    title_name = generate_title(text)
+    print(f'Título gerado para o texto: {title_name}')
+    output_path = f"summaries/{title_name}.md"
+    summary = generate_report_summary(text)
+    save_to_markdown(summary, output_path)
 
 if __name__ == "__main__":
     bootstrap()
